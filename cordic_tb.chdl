@@ -1,0 +1,315 @@
+_ = require "lodash"
+cordic = importDesign('./cordic.chdl')
+
+cordic_cfg={
+  data_width : 32   
+  angle_width : 32
+  max_iteration_num : 10
+  di_mode : 1
+  Q : 16
+}
+verify_cfg={
+  check_res : 0
+}
+
+class cordic_tb extends Module
+  cordic_u0 : new cordic(cordic_cfg.data_width, cordic_cfg.angle_width, cordic_cfg.max_iteration_num, cordic_cfg.di_mode, cordic_cfg.Q)
+  constructor: ->
+    super()
+    
+    @data_width = cordic_cfg.data_width
+    @angle_width = cordic_cfg.angle_width
+    @max_iteration_num = cordic_cfg.max_iteration_num
+    
+    @check = verify_cfg.check_res
+    @period = 10
+    @Q = cordic_cfg.Q
+    @di_mode = cordic_cfg.di_mode
+    Mixin importLib('verilog_helpers.chdl') 
+
+    @table_s = []
+    @Kn_1 = 1.0
+    tan = 1.0
+    K = 1.0
+    for i in _.range(@max_iteration_num)
+      artan = Math.atan(tan)*180/Math.PI
+      K = K * Math.cos(artan*Math.PI/180)
+      tan = tan / 2
+      @table_s.push(Math.ceil(artan*(2**@Q))) 
+    @Kn = Math.ceil(K*(2**@Q))
+    @Kn_1 = Math.ceil((1/K)*(2**@Q)) 
+    console.log(@Kn_1)
+    
+    
+    create_data_in = (mode) =>
+      if mode == 1
+        {
+          angle  : vreg(@angle_width)
+        }
+      else if mode == 2
+        {
+          y_0    : vreg(@data_width)
+        }
+      else
+        {
+          x_0   : vreg(@data_width)
+          angle : vreg(@angle_width)
+          y_0   : vreg(@data_width)
+        }
+    Reg(
+      data_in: create_data_in(@di_mode)
+      ctrl:
+        valid   : vreg()
+      cfg:
+        delta         : vreg(@data_width)
+        di_mode       : vreg(2)
+        iteration_num : vreg(8)
+    )
+    Reg(
+      clk : vreg()  
+      rstn : vreg().init(1)
+    )
+    
+
+    Channel(
+      data_in_ch  : channel()
+      data_out_ch : channel()
+      ctrl_ch     : channel()
+      cfg_ch      : channel()
+    )
+    
+    @cordic_u0.bind(
+      data_in  : @data_in_ch
+      data_out : @data_out_ch
+      ctrl     : @ctrl_ch
+      cfg      : @cfg_ch
+    )
+    
+    @setDefaultClock('clk')
+    @setDefaultReset('rstn') 
+    
+  cordic_soft:(x_0, y_0, angle_0, delta, mode, table, iter_num, max_iter_num) ->
+    res = {}
+    x = x_0
+    y = y_0
+    angle = angle_0
+    
+    for i in _.range(max_iter_num)
+      if mode == 1
+        cond = angle
+      else 
+        cond = -(x*y)
+      if cond > 0 
+        d = 1
+      else if cond == 0
+        d = 0
+      else
+        d = -1
+      console.log("iter  " + i)
+      console.log("x     " + x)
+      console.log("y     " + y)
+      console.log("angle " + angle)
+      console.log("d     " + d)
+      console.log("table " + table[i])
+      console.log("delta " + delta)
+      x_o = x - d * (y >> i)
+      y_o = y + d * (x >> i)
+      angle_o = angle - d * table[i]
+      
+      
+      x = x_o
+      y = y_o
+      angle = angle_o
+      
+      
+       
+            
+      if mode == 1
+        err  = angle
+      else 
+        err  = y
+      
+      if err < 0 
+        err = -err
+      console.log("err : " + err) 
+      if (((i+1) == iter_num) && (err < delta)) || (i==(max_iter_num - 1))
+        res["x"] = x
+        res["y"] = y
+        res["angle"] = angle
+        break
+      console.log("========cordic_tb===")
+    return res
+        
+  
+  cordic_sim:(seq, data_in, ctrl, ctrl_ch, cfg) ->
+    ret = {}
+    delta = Math.ceil((0.001)*(2**@Q))
+    mode = Math.floor(Math.random()*100)%2 + 1
+    if @di_mode == 1
+      x_in  = @Kn
+      angle = Math.floor(Math.random()*1000)%360
+      y_in  = 0
+      mode_in = @di_mode
+    else if @di_mode == 2
+      x_in = 1
+      y_in = Math.floor(Math.random()*100)
+      angle = 0
+      mode_in = @di_mode
+    else if @di_mode == 3
+      mode_in = mode
+      if mode == 1 
+        x_in =  @Kn
+        y_in =  0
+        angle = Math.floor(Math.random()*1000)%360
+      else 
+        x_in =  1
+        y_in =  Math.floor(Math.random()*100)
+        angle = 0
+        
+      
+    iter_num = Math.floor(Math.random()*100)%@max_iteration_num + 1
+    #input data 
+    console.log("x_in  " + x_in)
+    console.log("y_in  " + y_in)
+    console.log("angle " + angle)
+    
+    #real res 
+    console.log("cos: " + Math.cos(angle * Math.PI / 180)) 
+    console.log("sin:"  + Math.sin(angle * Math.PI / 180)) 
+    #console.log("tan_1_y: ")
+    if angle >= 0 and angle < 90
+      float_angle = (angle)*(2**@Q)
+    else if angle >= 90 and angle < 180
+      float_angle = (angle-90)*(2**@Q)
+    else if angle >= 180 and angle < 270
+      float_angle = (angle-180)*(2**@Q)
+    else
+      float_angle = (angle-270)*(2**@Q)
+      
+    
+    #run soft calc 
+    ret = @cordic_soft(x_in, y_in, float_angle, delta, mode_in, @table_s, iter_num, @max_iteration_num) 
+   
+     
+    console.log("cordic res========>")
+    console.log(ret)
+    #cordic res 
+    if angle >= 0 and angle < 90
+      console.log(ret.x)
+      console.log(ret.y)
+      console.log("cos:"  + ret.x / (2**@Q))
+      console.log("sin:"  + ret.y / (2**@Q))
+    else if angle >=90 and angle < 180
+      console.log((-ret.y + 1))
+      console.log(ret.x)
+      console.log("cos:"  + (-ret.y) / (2**@Q))
+      console.log("sin:"  + ret.x / (2**@Q))
+    else if angle >=180 and angle < 270
+      console.log((-ret.y + 1))
+      console.log((-ret.x + 1))
+      console.log("cos:"  + (-ret.x) / (2**@Q))
+      console.log("sin:"  + (-ret.y) / (2**@Q))
+    else
+      console.log((ret.y))
+      console.log((-ret.x + 1))
+      console.log("cos:"  + (ret.y) / (2**@Q))
+      console.log("sin:"  + (-ret.x) / (2**@Q))
+    console.log("tan_1:" + ret.angle / (2**@Q))
+    
+    
+    
+    #set reg 
+    seq.delay(10) =>
+      assign ctrl.valid = 1
+      if @di_mode == 3
+        assign data_in.x_0 = x_in
+      if @di_mode == 2 or @di_mode == 3
+        assign data_in.y_0 = y_in
+      if @di_mode == 1 or @di_mode == 3
+        assign data_in.angle = angle
+      
+      assign cfg.di_mode = mode
+      assign cfg.iteration_num = iter_num 
+      assign cfg.delta = delta
+    seq.polling(@clk, $ ctrl_ch.grant) =>
+      assign ctrl.valid = 0
+    return ret
+  
+  check_res:(seq, data_out, res, ctrl) ->
+    seq.polling(@clk, $ ctrl.ready) =>
+      @assert_eq(data_out.cos, res.x, "cos")
+      @assert_eq(data_out.sin, res.y, "sin")
+      @assert_eq(data_out.tan_1, res.angle, "tan_1")
+    
+  build: ->
+    end_signal = vreg(1, "end_signal") 
+    @create_clock(@clk,@period) 
+    @create_resetn(@rstn)                   # there is a 100 unit time delay
+    a = vreg(32, "a")
+    b = vreg(32, "b")
+    c = vreg(33, "c")
+    
+    
+    
+    
+    if @di_mode == 3 
+      assign @data_in_ch.x_0     = @data_in.x_0
+    
+    if @di_mode == 3 or @di_mode == 2
+      assign @data_in_ch.y_0     = @data_in.y_0
+    if @di_mode == 3 or @di_mode == 1
+      assign @data_in_ch.angle   = @data_in.angle
+    
+    
+    assign @ctrl_ch.valid = @ctrl.valid
+    
+    assign @cfg_ch.delta   = @cfg.delta
+    assign @cfg_ch.di_mode = @cfg.di_mode
+    assign @cfg_ch.iteration_num = @cfg.iteration_num
+    
+    soft_res = {} 
+    
+    initial
+      seq = $sequence("test")
+      seq.delay(215) =>
+        assign a = 1000
+        assign b = -4
+      seq.delay(10) =>
+        assign c = a.sign() - b.sign()
+      seq.end()
+     
+    initial
+      seq = $sequence("simulation")
+      seq.delay(215) =>
+        @display("start simulation")
+        soft_res = @cordic_sim(seq, @data_in, @ctrl, @ctrl_ch, @cfg)
+      seq.polling(@clk, $ @ctrl_ch.ready) =>
+        assign end_signal = 1
+        @display("set end_signal")
+      seq.delay(10) =>
+        @display("end simulation")
+        assign end_signal = 0
+      seq.end()
+    
+    if @check == 1  
+      initial
+        seq = $sequence("check res")
+        seq.delay(215) =>
+          @check_res(seq, @data_out_ch, soft_res, @ctrl_ch)
+        seq.end()
+        
+    
+      
+    initial
+      seq = $sequence("set sim finish")
+      seq.delay(500) =>
+      #seq.polling(@clk, $ end_signal) =>
+        @display("get end signal")
+      seq.delay(20) =>
+        if @check == 1
+          @assert_report()
+        @sim_finish() 
+      seq.end()
+       
+
+module.exports=cordic_tb

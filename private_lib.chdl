@@ -1,0 +1,228 @@
+_ = require "lodash"
+module.exports={
+  
+  #$test:(i) ->
+  #  console.log(i)  
+    
+  $sign:(data_in) ->
+    Net(d_i, data_in.getWidth())
+    assign d_i
+      $if(data_in.sign() > 0)
+        $ 1
+      $else
+        $ -1
+    return d_i 
+  
+  #di_mode 
+  # 01 -> rotate
+  # 10 -> vector
+  
+  $signed_expand:(origin, target_width) ->
+    
+    origin_width = origin.getWidth()
+    
+    Net(pre, (target_width-origin_width))
+    Net(target, target_width)
+    
+    if target_width > origin_width
+      assign pre = expand((target_width-origin_width), origin(origin_width-1 , 1))
+      assign target = cat(pre,origin)
+    else 
+      assign target = origin(0,target_width)
+      
+    return target
+  
+  $signed_shift:(signal, shift_num) -> 
+    
+    origin_width = signal.getWidth()
+    Net(cut,(origin_width-shift_num)) = signal(shift_num, (origin_width-shift_num))
+    
+    Net(shift_signal, origin_width) = $signed_expand(cut, origin_width)
+    
+    return shift_signal 
+   
+  $cordic_cell:(res, di_table, mode, stage_num, max_num, i) ->#(x, y, angle, en, di_table, di_mode, delta, cnt, cal_en, i) ->
+    
+     
+    data_width = res.x_nxt.getWidth()
+    angle_width = res.angle_nxt.getWidth()
+    #console.log(angle_width)
+    #console.log(i)
+    ret ={ 
+      x_nxt     : reg(data_width, "x_nxt_#{i}")
+      y_nxt     : reg(data_width, "y_nxt_#{i}")
+      angle_nxt : reg(angle_width, "angle_nxt_#{i}")
+      angle_org : reg(angle_width, "angle_org_#{i}")
+      en_o      : reg(1, "en_o_#{i}")
+      di_mode   : reg(2, "di_mode")
+      iter_cnt  : reg(8, "iter_cnt")
+      delta     : reg(data_width, "delta")
+      err       : reg(data_width, "err")
+      cal_en    : reg(1, "cal_en")
+      err_ok    : reg(1, "err_ok") if i == (stage_num - 1)
+    }
+     
+    x_nxt = ret.x_nxt 
+    y_nxt = ret.y_nxt
+    angle_nxt = ret.angle_nxt
+    en_o = ret.en_o
+    
+    x = res.x_nxt
+    y = res.y_nxt
+    angle = res.angle_nxt
+    en = res.en_o
+    di_mode = res.di_mode
+    cnt = res.iter_cnt
+    delta = res.delta
+    cal_en = res.cal_en
+    
+    
+    cond_list=[]
+    for index in _.range(max_num)
+      cond_list.push($cond(res.iter_cnt == index) => $signed_shift(x, index))
+      Net(x_shift, data_width)  = $balance(cond_list, data_width)
+         
+    cond_list=[]
+    for index in _.range(max_num)
+      cond_list.push($cond(res.iter_cnt == index) => $signed_shift(y, index))
+      Net(y_shift, data_width)  = $balance(cond_list, data_width)
+    
+    if(mode & 2) == 2
+      Net(t, ((angle_width+1)*2)) = x.sign()*y.sign()
+   
+    if(mode & 1) == 1
+      Net(di, angle_width)       = $sign(angle)
+    
+    if(mode & 2) == 2
+      Net(di_2, (angle_width*2)) = $sign(t)
+    
+    cond_list=[]
+    for index in _.range(max_num)
+      cond_list.push($cond(res.iter_cnt == index) => $ di_table[index])
+     
+    Net(angle_step, angle_width) = $balance(cond_list, angle_width)
+     
+    
+    
+    Net(x_signed, data_width) = x.sign()
+    Net(x_shift_signed, data_width) = x_shift.sign()
+    
+    Net(y_signed, data_width) = y.sign()
+    Net(y_shift_signed, data_width) = y_shift.sign()
+    
+    Net(angle_signed, angle_width) = angle.sign()
+    
+    Net err_calc_cond = cal_en && en
+    
+    minus = $ bin(1,0) 
+    origin = $ bin(1,0)
+    
+    if (mode & 1) == 1
+      minus = $ minus | (angle.sign() < 0)
+      origin = $ minus | (angle.sign() >= 0)
+      
+    if (mode & 2) == 2
+      minus = $ minus | (y.sign() < 0)
+      origin = $ minus | (y.sign() > 0)
+    
+    Net get_minus =  minus
+    Net get_origin =  origin
+    
+    mode_cond = $ bin(1, 1)
+    
+    if mode == 3
+      mode_cond = $ (di_mode==bin(2,1))
+    
+    
+    pos_cond_1 = $ bin(1,0)      
+    neg_cond_1 = $ bin(1,0)
+    if mode == 1 or mode == 3
+      pos_cond_1 = $ ((di.sign() >= 0) && (mode_cond))
+      neg_cond_1 = $ ((di.sign() < 0) && (mode_cond)) 
+    if i == (stage_num - 1)
+      if mode == 1 or mode == 3
+        Net(angle_err, (data_width))
+        assign angle_err
+          $if(mode_cond && get_minus && err_calc_cond)
+            $ 0 - angle_signed
+          $elseif(mode_cond && get_origin && err_calc_cond)
+            $ angle_signed
+          $else
+            $ hex(angle_width+1,0)
+        Net angle_err_ok = mode_cond && (angle_err < delta) && (err_calc_cond)
+        
+        
+    if mode == 3
+      mode_cond = $ (di_mode==bin(2,2))
+      
+    pos_cond_2 = $ bin(1,0)      
+    neg_cond_2 = $ bin(1,0)
+    if mode == 2 or mode == 3
+      pos_cond_2 = $ ((di_2.sign() <= 0) && (mode_cond))  
+      neg_cond_2 = $ ((di_2.sign() > 0) && (mode_cond))
+      
+    if i == (stage_num - 1)
+      if mode == 2 or mode == 3
+        Net(data_err, (angle_width+1))
+        Net data_err_ok = mode_cond && (data_err < delta) && err_calc_cond
+        assign data_err
+          $if(mode_cond && get_minus && err_calc_cond)
+            $ 0 - y_signed
+          $elseif(mode_cond && get_origin && err_calc_cond) 
+            $ y_signed
+          $else
+            $ hex(data_width+1,0) 
+        
+    
+    
+     
+      
+    Net pos = pos_cond_1 || pos_cond_2
+    Net neg = neg_cond_1 || neg_cond_2 
+    
+    Net(cal_cond, 1) = cal_en
+      
+    
+    
+     
+    assign x_nxt  
+      $if(pos && en && cal_cond)
+        $ x_signed - y_shift_signed
+      $elseif(neg && en && cal_cond)
+        $ x_signed + y_shift_signed
+      $else
+        $ cat(x((data_width-1),1), x)
+    
+    assign y_nxt
+      $if(pos && en && cal_cond)
+        $ y_signed + x_shift_signed
+      $elseif(neg && en && cal_cond)
+        $ y_signed - x_shift_signed
+      $else
+        $ cat(y((data_width-1),1), y)
+    
+    assign angle_nxt
+      $if(pos && en && cal_cond)
+        $ angle_signed - angle_step
+      $elseif(neg && en && cal_cond)
+        $ angle_signed + angle_step
+      $else
+        $ cat(angle((angle_width-1),1), angle) 
+    
+    assign en_o = en 
+    
+    assign ret.cal_en = cal_cond
+    
+    assign ret.iter_cnt = cnt + 1
+    
+    assign ret.delta = delta 
+    if mode == 3
+      assign ret.di_mode = di_mode
+    else
+      assign ret.di_mode = mode
+    
+    assign ret.angle_org = res.angle_org
+     
+    return ret 
+    
+}

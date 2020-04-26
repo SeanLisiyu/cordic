@@ -1,15 +1,18 @@
 _ = require "lodash"
 class cordic extends Module
-  constructor: (data_width, angle_width, max_iteration_times, di_mode, Q) ->
+  constructor: (data_width, angle_width, max_iteration_times, di_mode, Q, stage_num) ->
     super()
     
     Mixin importLib('./private_lib')
     @data_width = data_width ?  32
     @angle_width = angle_width ? 32
-    @max_iteration_times = max_iteration_times ? 10
+    @max_iteration_times = max_iteration_times ? 16
+    
+    @stage_num = stage_num ? 8 
+    @max_iteration_times = Math.floor(@max_iteration_times/@stage_num) * @stage_num
+    
     @di_mode = di_mode ? 3 
     @Q = Q ? 16
-    
     @angle_table = []
     @Kn_1 = 1.0
     tan = 1.0
@@ -75,9 +78,21 @@ class cordic extends Module
       di_mode   : wire(2, "res_di_mode")
       en_o      : wire(1, "res_en_o")
       iter_cnt  : wire(8, "res_iter_cnt")
-      cal_en    : wire(1, "cal_en")
+      cal_en    : wire(1, "res_cal_en")
     } 
     
+    final = {
+      x_nxt     : wire(@data_width, "final_x_nxt")
+      y_nxt     : wire(@data_width, "final_y_nxt") 
+      angle_nxt : wire(@angle_width,"final_angle_nxt")
+      angle_org : wire(@angle_width,"final_angle_org")
+      delta     : wire(@data_width, "final_delta")
+      di_mode   : wire(2, "final_di_mode")
+      en_o      : wire(1, "final_en_o")
+      iter_cnt  : wire(8, "final_iter_cnt")
+      cal_en    : wire(1, "final_cal_en")
+      err_ok    : wire(1, "final_err_ok")
+    } 
     Net(angle_less, @angle_width)
     Net(rerun, 1)
     
@@ -94,50 +109,133 @@ class cordic extends Module
     
     
     if @di_mode == 1 
-      assign res.x_nxt = hex(@data_width,@Kn)
-      assign res.y_nxt = hex(@data_width,0)
-      assign res.angle_nxt = angle_less << @Q
-      assign res.angle_org = @data_in.angle << @Q
+      assign res.x_nxt 
+        $if(rerun && final.en_o)
+          $ final.x_nxt
+        $else
+          $ hex(@data_width,@Kn)
+          
+      assign res.y_nxt 
+        $if(rerun && final.en_o)
+          $ final.y_nxt
+        $else
+          $ hex(@data_width,0)
+          
+      assign res.angle_nxt 
+        $if(rerun && final.en_o)
+          $ final.angle_nxt
+        $else
+          $ angle_less << @Q
+          
+      assign res.angle_org
+        $if(rerun && final.en_o)
+          $ final.angle_org
+        $else
+          $ @data_in.angle << @Q
+         
     else if @di_mode == 2 
-      assign res.x_nxt = hex(@data_width,1)
-      assign res.y_nxt = @data_in.y_0
-      assign res.angle_nxt = hex(@angle_width,0)
-      assign res.angle_org = hex(@angle_width,0)
+      assign res.x_nxt
+        $if(rerun && final.en_o)
+          $ final.x_nxt
+        $else
+          $ hex(@data_width,1)
+          
+      assign res.y_nxt
+        $if(rerun && final.en_o)
+          $ final.y_nxt
+        $else
+          $ @data_in.y_0
+          
+      assign res.angle_nxt
+        $if(rerun && final.en_o)
+          $ final.angle_nxt
+        $else
+          $ hex(@angle_width,0)
+          
+      assign res.angle_org 
+        $if(rerun && final.en_o)
+          $ final.angle_org
+        $else
+          $ hex(@angle_width,0)
     else
-      assign res.x_nxt = @data_in.x_0
-      assign res.y_nxt = @data_in.y_0
-      assign res.angle_nxt = angle_less << @Q
-      assign res.angle_org = @data_in.angle << @Q
+      assign res.x_nxt
+        $if(rerun && final.en_o)
+          $ final.x_nxt
+        $else
+          $ @data_in.x_0
+          
+      assign res.y_nxt
+        $if(rerun && final.en_o)
+          $ final.y_nxt
+        $else
+          $ @data_in.y_0
+          
+      assign res.angle_nxt
+        $if(rerun && final.en_o)
+          $ final.angle_nxt
+        $else
+          $ angle_less << @Q
+      assign res.angle_org
+        $if(rerun && final.en_o)
+          $ final.angle_org
+        $else
+          $ @data_in.angle << @Q
     
-    assign res.en_o = @ctrl.valid
     
-    assign res.delta = @cfg.delta
+    assign res.en_o 
+      $if(rerun && final.en_o)
+        $ final.en_o
+      $else
+        $ @ctrl.valid
+    
+    assign res.delta
+      $if(rerun && final.en_o)
+        $ final.delta
+      $else 
+        $ @cfg.delta
+        
     if @di_mode == 3
-      assign res.di_mode = @cfg.di_mode 
+      assign res.di_mode 
+        $if(rerun && final.en_o)
+          $ final.di_mode
+        $else 
+          $ @cfg.di_mode
       
-    assign res.iter_cnt = @cfg.iteration_num
-    assign res.cal_en = @ctrl.valid
+    assign res.iter_cnt
+      $if(rerun && final.en_o)
+        $ final.iter_cnt
+      $else
+        $ 0
+        
+    assign res.cal_en
+      $if(rerun && final.en_o)
+        $ final.cal_en
+      $else
+        $ @ctrl.valid 
      
     
     
     
-    for i in _.range(@max_iteration_times)
-      res = $cordic_cell(res, @angle_table, @di_mode, @max_iteration_times, i)  
+    for i in _.range(@stage_num)
+      res = $cordic_cell(res, @angle_table, @di_mode, @stage_num, @max_iteration_times, i)  
     
     Net(angle_origin, @angle_width) = (res.angle_org >> @Q)
     
     
-    rerun_limit = 2*@max_iteration_times
+    rerun_limit = @max_iteration_times
     
     assign rerun
-      $if(!res.err_ok && ((res.iter_cnt + 1) < rerun_limit) && res.en_o) => 1
-      $else => 0
+      $if(((res.iter_cnt + 1) < rerun_limit) && res.en_o) => $ 1
+      $else => $ 0
         
     
     Net(data_out_x, @data_width) 
     Net(data_out_y, @data_width) 
     Net(data_out_z, @angle_width) 
+   
     
+    for key in Object.keys(final)
+      assign final[key] = res[key]  
      
     assign @data_out.cos
       $if(angle_origin >=0 && angle_origin < 90) 
@@ -152,7 +250,7 @@ class cordic extends Module
     assign @data_out.sin 
       $if(angle_origin >=0 && angle_origin < 90) 
         $ res.y_nxt(0,@data_width).sign()
-      $elseif(angle_origin >=90 && angle_origin < 270)
+      $elseif(angle_origin >=90 && angle_origin < 180)
         $ res.x_nxt(0,@data_width).sign()
       $elseif(angle_origin >=180 && angle_origin < 270) 
         $ 1 - res.y_nxt(0,@data_width).sign()

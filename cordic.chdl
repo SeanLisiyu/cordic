@@ -1,6 +1,6 @@
 _ = require "lodash"
 class cordic extends Module
-  constructor: (data_width, angle_width, max_iteration_times, di_mode, Q, stage_num) ->
+  constructor: (data_width, angle_width, max_iteration_times, cfg_di_mode, Q, stage_num) ->
     super()
     
     Mixin importLib('./private_lib')
@@ -11,42 +11,100 @@ class cordic extends Module
     @stage_num = stage_num ? 8 
     @max_iteration_times = Math.floor(@max_iteration_times/@stage_num) * @stage_num
     
-    @di_mode = di_mode ? 3 
+    @cfg_di_mode = cfg_di_mode ? "atanh" 
+    
+    if @cfg_di_mode == "sin"
+      @di_mode =  1
+    else if @cfg_di_mode == "atan"
+      @di_mode =  2
+    else if @cfg_di_mode == "sinh"  # => exp(x)
+      @di_mode =  3
+    else if @cfg_di_mode == "atanh" # => ln(x)
+      @di_mode =  4
+    else
+      @di_mode =  5
+      
     @Q = Q ? 16
-    @angle_table = []
-    @Kn_1 = 1.0
+    @angle_table_tri = []
+    @angle_table_hyp = []
+    
+    ln_2 = Math.floor(Math.log(2)*(2**@Q))
     tan = 1.0
-    K = 1.0
+    K1 = 1.0
     for i in _.range(@max_iteration_times)
       artan = Math.atan(tan)*180/Math.PI
-      K = K * Math.cos(artan*Math.PI/180)
+      K1 = K1 * Math.cos(artan*Math.PI/180)
       tan = tan / 2
-      @angle_table.push(Math.ceil(artan*(2**@Q))) 
-    @Kn = Math.ceil(K*(2**@Q))
-    @Kn_1 = Math.ceil((1/K)*(2**@Q))
+      @angle_table_tri.push(Math.floor(artan*(2**@Q))) 
+    @Kn_tri = Math.ceil(K1*(2**@Q))
+    
+    tanh=0.5
+    K2 = 1.0
+    for i in _.range(@max_iteration_times)
+      artan = Math.atanh(tanh)
+      K2 = K2 * Math.cosh(artan)
+      tanh = tanh / 2
+      @angle_table_hyp.push(Math.floor(artan*(2**@Q))) 
+    
+    @Kn_hyp = Math.floor(K2*(2**@Q))
+    #console.log(K2)
+    #console.log(@Kn_hyp)
+    #console.log(@angle_table_hyp)
+    
+    
     create_input = (mode) =>
-      if mode == 1
+      if mode == 1 or mode == 3
         {
           angle  : input(@angle_width)
         }
-      else if mode == 2
+       else if mode == 2 or mode == 4
         {
           y_0    : input(@data_width)
         }
       else
         {
           x_0   : input(@data_width)
-          angle : input(@angle_width)
           y_0   : input(@data_width)
+          angle : input(@angle_width)
         }
     
+    create_output = (mode) =>
+      if mode == 1
+        {
+          sin    : output(@data_width)
+          cos    : output(@data_width)
+        }
+      else if mode == 2
+        {
+          atan   : output(@angle_width)
+        } 
+      else if mode == 3
+        {
+          sinh   : output(@data_width)
+          cosh   : output(@data_width)
+          e_x    : output(@data_width)
+        }
+      else if mode == 4
+        {
+          atanh  : output(@angle_width)
+          ln_x   : output(@angle_width)
+        }
+      else
+        {
+          sin    : output(@data_width)
+          cos    : output(@data_width)
+          atan   : output(@angle_width)
+          sinh   : output(@data_width)
+          cosh   : output(@data_width)
+          atanh  : output(@angle_width)
+          e_x    : output(@data_width)
+          ln_x   : output(@angle_width)
+        }
+        
     Port(
       
-      data_out:
-        sin    : output(@data_width)
-        cos    : output(@data_width)
-        tan_1  : output(@angle_width)
-      
+      data_out:create_output(@di_mode)
+      data_in: create_input(@di_mode)
       ctrl:
         valid  : input()
         ready  : output()
@@ -54,9 +112,7 @@ class cordic extends Module
        
       cfg:
         delta         : input(@data_width)
-        iteration_num : input(8)
-        di_mode       : input(2)
-      data_in: create_input(@di_mode)
+        di_mode       : input(8)
     )
   
   
@@ -75,7 +131,7 @@ class cordic extends Module
       angle_nxt : wire(@angle_width,"res_angle_nxt")
       angle_org : wire(@angle_width,"res_angle_org")
       delta     : wire(@data_width, "res_delta")
-      di_mode   : wire(2, "res_di_mode")
+      di_mode   : wire(8, "res_di_mode")
       en_o      : wire(1, "res_en_o")
       iter_cnt  : wire(8, "res_iter_cnt")
       cal_en    : wire(1, "res_cal_en")
@@ -87,137 +143,119 @@ class cordic extends Module
       angle_nxt : wire(@angle_width,"final_angle_nxt")
       angle_org : wire(@angle_width,"final_angle_org")
       delta     : wire(@data_width, "final_delta")
-      di_mode   : wire(2, "final_di_mode")
+      di_mode   : wire(8, "final_di_mode")
       en_o      : wire(1, "final_en_o")
       iter_cnt  : wire(8, "final_iter_cnt")
       cal_en    : wire(1, "final_cal_en")
       err_ok    : wire(1, "final_err_ok")
-    } 
-    Net(angle_less, @angle_width)
+    }
+    
+    
     Net(rerun, 1)
     
-    assign angle_less
-      $if(@data_in.angle>=0 && @data_in.angle < 90)
-        $ @data_in.angle
-      $elseif(@data_in.angle>=90 && @data_in.angle < 180)
-        $ @data_in.angle - 90
-      $elseif(@data_in.angle>=180 && @data_in.angle < 270)
-        $ @data_in.angle - 180
-      $else
-        $ @data_in.angle - 270
-      
-    
-    
-    if @di_mode == 1 
-      assign res.x_nxt 
-        $if(rerun && final.en_o)
-          $ final.x_nxt
-        $else
-          $ hex(@data_width,@Kn)
-          
-      assign res.y_nxt 
-        $if(rerun && final.en_o)
-          $ final.y_nxt
-        $else
-          $ hex(@data_width,0)
-          
-      assign res.angle_nxt 
-        $if(rerun && final.en_o)
-          $ final.angle_nxt
-        $else
-          $ angle_less << @Q
-          
-      assign res.angle_org
-        $if(rerun && final.en_o)
-          $ final.angle_org
-        $else
-          $ @data_in.angle << @Q
-         
-    else if @di_mode == 2 
-      assign res.x_nxt
-        $if(rerun && final.en_o)
-          $ final.x_nxt
-        $else
-          $ hex(@data_width,1)
-          
-      assign res.y_nxt
-        $if(rerun && final.en_o)
-          $ final.y_nxt
-        $else
-          $ @data_in.y_0
-          
-      assign res.angle_nxt
-        $if(rerun && final.en_o)
-          $ final.angle_nxt
-        $else
-          $ hex(@angle_width,0)
-          
-      assign res.angle_org 
-        $if(rerun && final.en_o)
-          $ final.angle_org
-        $else
-          $ hex(@angle_width,0)
+    inner_mode = wire(8, "inner_mode")
+   
+    if @di_mode < 5
+      assign inner_mode = @di_mode
     else
-      assign res.x_nxt
-        $if(rerun && final.en_o)
-          $ final.x_nxt
-        $else
-          $ @data_in.x_0
-          
-      assign res.y_nxt
-        $if(rerun && final.en_o)
-          $ final.y_nxt
-        $else
-          $ @data_in.y_0
-          
-      assign res.angle_nxt
-        $if(rerun && final.en_o)
-          $ final.angle_nxt
-        $else
+      assign inner_mode = @cfg.di_mode
+     
+    cond_list = []
+    if @di_mode==1 or @di_mode==5 
+      Net(angle_less, @angle_width)
+      for idx in _.range(4)
+        do(idx) =>
+          cond_list.push($lazy_cond(@data_in.angle>=(idx*90) && @data_in.angle<(idx*90+90) && (@cfg.di_mode==1)) =>
+            assign angle_less = @data_in.angle - (idx*90)
+          )
+      always
+        $if_blocks(cond_list)
+      
+      #assign angle_less
+      #  $if(@data_in.angle>=0 && @data_in.angle < 90)
+      #    $ @data_in.angle
+      #  $elseif(@data_in.angle>=90 && @data_in.angle < 180)
+      #    $ @data_in.angle - 90
+      #  $elseif(@data_in.angle>=180 && @data_in.angle < 270)
+      #    $ @data_in.angle - 180
+      #  $else
+      #    $ @data_in.angle - 270
+      
+     
+    num = 2**@Q 
+    assign res.x_nxt
+      $if(rerun && final.en_o) => $ final.x_nxt
+      $elseif(inner_mode==1) => $ @Kn_tri
+      $elseif(inner_mode==2) => $ 1
+      $elseif(inner_mode==3) => $ @Kn_hyp
+      $elseif(inner_mode==4)
+        if @di_mode==4 or @di_mode==5 
+          $ @data_in.y_0 + num
+        else
+          $ 0
+      $else => $ 0
+       
+    assign res.y_nxt
+      $if(rerun && final.en_o) => $ final.y_nxt
+      $elseif(inner_mode==1 || inner_mode==3) => $ 0
+      $elseif(inner_mode==2) => $ 1
+      $elseif(inner_mode==4)
+        if @di_mode==4 or @di_mode==5 
+          $  @data_in.y_0 - num
+        else
+          $ 0
+      $else => $ 0
+        
+    assign res.angle_nxt
+      $if(rerun && final.en_o) => $ final.angle_nxt
+      $elseif(inner_mode==1)
+        if @di_mode==1 or @di_mode==5 
           $ angle_less << @Q
-      assign res.angle_org
-        $if(rerun && final.en_o)
-          $ final.angle_org
-        $else
+        else
+          $ 0
+      $elseif(inner_mode==2) => $ 0
+      $elseif(inner_mode==3)
+        if @di_mode==3 or @di_mode==5 
           $ @data_in.angle << @Q
+        else
+          $ 0
+      $elseif(inner_mode==4) => $ 0
+      $else => $ 0
+    assign res.angle_org
+      $if(rerun && final.en_o) => $ final.angle_org
+      $elseif(inner_mode==1 || inner_mode==3)
+        if @di_mode==3 or @di_mode==5 or @di_mode==1
+          $ @data_in.angle << @Q
+        else
+          $ 0
+      $else => $ 0
     
     
     assign res.en_o 
-      $if(rerun && final.en_o)
-        $ final.en_o
-      $else
-        $ @ctrl.valid
+      $if(rerun && final.en_o) => $ final.en_o
+      $else => $ @ctrl.valid
     
     assign res.delta
-      $if(rerun && final.en_o)
-        $ final.delta
-      $else 
-        $ @cfg.delta
+      $if(rerun && final.en_o) => $ final.delta
+      $else  => $ @cfg.delta
         
-    if @di_mode == 3
-      assign res.di_mode 
-        $if(rerun && final.en_o)
-          $ final.di_mode
-        $else 
-          $ @cfg.di_mode
+    assign res.di_mode 
+      $if(rerun && final.en_o) => $ final.di_mode
+      $else => $ inner_mode
       
     assign res.iter_cnt
-      $if(rerun && final.en_o)
-        $ final.iter_cnt
-      $else
-        $ 0
+      $if(rerun && final.en_o) => $ final.iter_cnt
+      $else => $ 0
         
     assign res.cal_en
-      $if(rerun && final.en_o)
-        $ final.cal_en
-      $else
-        $ @ctrl.valid 
+      $if(rerun && final.en_o) => $ final.cal_en
+      $else => $ @ctrl.valid 
      
     
     
     
     for i in _.range(@stage_num)
-      res = $cordic_cell(res, @angle_table, @di_mode, @stage_num, @max_iteration_times, i)  
+      res = $cordic_cell(res, @angle_table_tri, @angle_table_hyp, @di_mode, @stage_num, @max_iteration_times, i)  
     
     Net(angle_origin, @angle_width) = (res.angle_org >> @Q)
     
@@ -236,30 +274,52 @@ class cordic extends Module
     
     for key in Object.keys(final)
       assign final[key] = res[key]  
-     
-    assign @data_out.cos
-      $if(angle_origin >=0 && angle_origin < 90) 
-        $ res.x_nxt(0,@data_width).sign()
-      $elseif(angle_origin >=90 && angle_origin < 180) 
-        $ 1 - res.y_nxt(0,@data_width).sign()
-      $elseif(angle_origin >=180 && angle_origin < 270) 
-        $ 1 - res.x_nxt(0,@data_width).sign()
-      $else
-        $ res.y_nxt(0, @data_width).sign() 
       
-    assign @data_out.sin 
-      $if(angle_origin >=0 && angle_origin < 90) 
-        $ res.y_nxt(0,@data_width).sign()
-      $elseif(angle_origin >=90 && angle_origin < 180)
-        $ res.x_nxt(0,@data_width).sign()
-      $elseif(angle_origin >=180 && angle_origin < 270) 
-        $ 1 - res.y_nxt(0,@data_width).sign()
-      $else
-        $ 1 - res.x_nxt(0,@data_width).sign()
-    
-    assign @data_out.tan_1 = res.angle_nxt(0,@angle_width).sign()
+    if @di_mode == 1  or @di_mode == 5
+      assign @data_out.cos
+        $if(angle_origin >=0 && angle_origin < 90 && inner_mode == 1) 
+          $ res.x_nxt(0,@data_width).sign()
+        $elseif(angle_origin >=90 && angle_origin < 180 && inner_mode == 1) 
+          $ 1 - res.y_nxt(0,@data_width).sign()
+        $elseif(angle_origin >=180 && angle_origin < 270 && inner_mode == 1) 
+          $ 1 - res.x_nxt(0,@data_width).sign()
+        $else
+          $ res.y_nxt(0, @data_width).sign() 
         
+      assign @data_out.sin 
+        $if(angle_origin >=0 && angle_origin < 90 && inner_mode == 1) 
+          $ res.y_nxt(0,@data_width).sign()
+        $elseif(angle_origin >=90 && angle_origin < 180 && inner_mode == 1)
+          $ res.x_nxt(0,@data_width).sign()
+        $elseif(angle_origin >=180 && angle_origin < 270 && inner_mode == 1) 
+          $ 1 - res.y_nxt(0,@data_width).sign()
+        $else
+          $ 1 - res.x_nxt(0,@data_width).sign()
+   
+    if @di_mode == 2 or @di_mode == 5
+      assign @data_out.atan 
+        $if(inner_mode == 2) => $ res.angle_nxt(0,@angle_width).sign()
+        $else => $ 0
+        
+    if @di_mode == 3 or @di_mode == 5
+      assign @data_out.sinh
+        $if(inner_mode == 3) => $ res.y_nxt
+        $else => $ 0
+      assign @data_out.cosh
+        $if(inner_mode == 3) => $ res.x_nxt
+        $else => $ 0
+      assign @data_out.e_x  = res.x_nxt + res.y_nxt 
     
+    if @di_mode == 4 or @di_mode == 5
+      assign @data_out.atanh
+        $if(inner_mode == 4) => $ res.angle_nxt
+        $else => $ 0
+      
+      assign @data_out.ln_x
+        $if(inner_mode == 4) => $ res.angle_nxt.sign() << 1
+        $else => $ 0
+    
+     
     assign @ctrl.grant = @ctrl.valid && (!rerun)
     
     assign @ctrl.ready = res.en_o && (!rerun)
